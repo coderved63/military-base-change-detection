@@ -91,7 +91,8 @@ def check_gpu() -> Tuple[Optional[str], Optional[str], Optional[float]]:
         return None, None, None
 
     gpu_name = torch.cuda.get_device_name(0)
-    vram_gb = torch.cuda.get_device_properties(0).total_mem / 1e9
+    props = torch.cuda.get_device_properties(0)
+    vram_gb = getattr(props, "total_memory", getattr(props, "total_mem", 0)) / 1e9
 
     name_upper = gpu_name.upper()
     if "T4" in name_upper:
