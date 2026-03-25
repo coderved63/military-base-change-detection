@@ -62,8 +62,8 @@ class UNetPPChangeDetection(nn.Module):
         # Compute absolute difference at each scale
         diff_features = [torch.abs(f1 - f2) for f1, f2 in zip(features_1, features_2)]
 
-        # Decode
-        decoder_output = self.decoder(*diff_features)
+        # Decode (SMP decoder expects a list of features, not unpacked args)
+        decoder_output = self.decoder(diff_features)
         out = self.segmentation_head(decoder_output)
         return out
 
