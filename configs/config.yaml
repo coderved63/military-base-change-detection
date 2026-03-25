@@ -1,0 +1,143 @@
+# =============================================================================
+# Military Base Change Detection — Master Configuration
+# =============================================================================
+
+# --- Project paths ---
+project:
+  name: "military-base-change-detection"
+  seed: 42
+
+# --- Colab / runtime settings ---
+colab:
+  enabled: true
+  drive_root: "/content/drive/MyDrive/change-detection"
+  checkpoint_dir: "/content/drive/MyDrive/change-detection/checkpoints"
+  log_dir: "/content/drive/MyDrive/change-detection/logs"
+  output_dir: "/content/drive/MyDrive/change-detection/outputs"
+  data_dir: "/content/drive/MyDrive/change-detection/processed_data"
+
+# --- Local paths (used when colab.enabled is false) ---
+paths:
+  raw_data: "./raw_data"
+  processed_data: "./processed_data"
+  checkpoint_dir: "./checkpoints"
+  log_dir: "./logs"
+  output_dir: "./outputs"
+
+# --- Dataset ---
+dataset:
+  name: "levir-cd"                 # levir-cd | whu-cd
+  original_size: 1024
+  patch_size: 256
+  num_workers: 4
+  pin_memory: true
+  # ImageNet normalization
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+
+# --- Augmentation (train only) ---
+augmentation:
+  enabled: true
+  horizontal_flip: 0.5
+  vertical_flip: 0.5
+  random_rotate_90: 0.5
+  color_jitter:
+    brightness: 0.2
+    contrast: 0.2
+    saturation: 0.1
+    hue: 0.05
+
+# --- Model selection ---
+model:
+  name: "unet_pp"                  # siamese_cnn | unet_pp | changeformer
+
+# --- Model-specific configs ---
+siamese_cnn:
+  backbone: "resnet18"
+  pretrained: true
+
+unet_pp:
+  encoder_name: "resnet34"
+  pretrained: true
+  deep_supervision: false
+
+changeformer:
+  embed_dims: [64, 128, 320, 512]  # MiT-B1 style
+  num_heads: [1, 2, 5, 8]
+  mlp_ratios: [8, 8, 4, 4]
+  depths: [2, 2, 2, 2]
+  pretrained_backbone: true
+
+# --- Training ---
+training:
+  epochs: 100                      # 200 for changeformer
+  optimizer: "adamw"
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  scheduler: "cosine"
+  warmup_epochs: 5
+  grad_clip_max_norm: 1.0
+  gradient_accumulation_steps: 1   # set to 2 for changeformer on T4
+  amp: true                        # mixed precision
+  early_stopping:
+    enabled: true
+    patience: 15
+    metric: "f1"
+    mode: "max"
+  log_interval: 10                 # log every N batches
+  vis_interval: 5                  # visualize predictions every N epochs
+
+# --- Loss ---
+loss:
+  name: "bce_dice"                 # bce_dice | focal
+  bce_dice:
+    bce_weight: 0.5
+    dice_weight: 0.5
+  focal:
+    alpha: 0.25
+    gamma: 2.0
+
+# --- Evaluation ---
+evaluation:
+  threshold: 0.5
+  metrics:
+    - f1
+    - iou
+    - precision
+    - recall
+    - oa
+
+# --- GPU-specific batch sizes (auto-detected on Colab) ---
+# model_name -> { gpu_type -> batch_size }
+batch_sizes:
+  siamese_cnn:
+    T4: 16
+    V100: 16
+    default: 8
+  unet_pp:
+    T4: 8
+    V100: 12
+    default: 4
+  changeformer:
+    T4: 4
+    V100: 6
+    default: 2
+
+# --- Per-model learning rates ---
+learning_rates:
+  siamese_cnn: 1.0e-3
+  unet_pp: 1.0e-4
+  changeformer: 6.0e-5
+
+# --- Per-model epoch counts ---
+epoch_counts:
+  siamese_cnn: 100
+  unet_pp: 100
+  changeformer: 200
+
+# --- Gradio demo ---
+gradio:
+  server_port: 7860
+  share: false
+  default_model: "unet_pp"
+  default_checkpoint: "checkpoints/unet_pp_best.pth"
