@@ -1,10 +1,9 @@
 """Gradio web demo for satellite change detection.
 
-Upload before/after satellite image pairs, select a model and checkpoint, and
-view the predicted change mask, overlay, and change-area statistics.
+Upload before/after satellite image pairs, select a model, and view the
+predicted change mask, overlay, and change-area statistics.
 
-Defaults (model, checkpoint, port, share) are read from the ``gradio`` section
-of ``configs/config.yaml``.
+Auto-detects available checkpoints — no manual path entry needed.
 
 Usage:
     python app.py
@@ -12,16 +11,15 @@ Usage:
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-import cv2
 import gradio as gr
 import numpy as np
 import torch
 import yaml
 
 from data.dataset import IMAGENET_MEAN, IMAGENET_STD
-from inference import load_and_preprocess, sliding_window_inference
+from inference import sliding_window_inference
 from models import get_model
 from utils.visualization import overlay_changes
 
@@ -29,14 +27,32 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Globals (model cache to avoid reloading on every prediction)
+# Globals
 # ---------------------------------------------------------------------------
 
 _cached_model: Optional[torch.nn.Module] = None
-_cached_model_key: Optional[str] = None  # "model_name::checkpoint_path"
+_cached_model_key: Optional[str] = None
 _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _config: Optional[Dict[str, Any]] = None
 
+# Search these directories for checkpoint files
+_CHECKPOINT_SEARCH_DIRS = [
+    Path("checkpoints"),
+    Path("/kaggle/working/checkpoints"),
+    Path("/content/drive/MyDrive/change-detection/checkpoints"),
+]
+
+# Map model names to expected checkpoint filenames
+_MODEL_CHECKPOINT_NAMES = {
+    "siamese_cnn": "siamese_cnn_best.pth",
+    "unet_pp": "unet_pp_best.pth",
+    "changeformer": "changeformer_best.pth",
+}
+
+
+# ---------------------------------------------------------------------------
+# Config / model loading
+# ---------------------------------------------------------------------------
 
 def _load_config() -> Dict[str, Any]:
     """Load and cache the project config.
@@ -52,43 +68,81 @@ def _load_config() -> Dict[str, Any]:
     return _config
 
 
-def _load_model(model_name: str, checkpoint_path: str) -> torch.nn.Module:
-    """Load a model, re-using the cache if name + checkpoint match.
+def _find_checkpoint(model_name: str) -> Optional[Path]:
+    """Auto-detect the checkpoint file for a given model.
+
+    Searches multiple directories for the expected checkpoint filename.
 
     Args:
-        model_name: Architecture name (``siamese_cnn``, ``unet_pp``, ``changeformer``).
-        checkpoint_path: Path to the ``.pth`` checkpoint file.
+        model_name: One of ``siamese_cnn``, ``unet_pp``, ``changeformer``.
+
+    Returns:
+        Path to the checkpoint if found, ``None`` otherwise.
+    """
+    filename = _MODEL_CHECKPOINT_NAMES.get(model_name)
+    if filename is None:
+        return None
+
+    for search_dir in _CHECKPOINT_SEARCH_DIRS:
+        candidate = search_dir / filename
+        if candidate.exists():
+            return candidate
+
+    return None
+
+
+def _get_available_models() -> List[str]:
+    """Return a list of model names that have checkpoints available.
+
+    Returns:
+        List of model name strings with detected checkpoints.
+    """
+    available = []
+    for model_name in _MODEL_CHECKPOINT_NAMES:
+        if _find_checkpoint(model_name) is not None:
+            available.append(model_name)
+    return available
+
+
+def _load_model(model_name: str) -> torch.nn.Module:
+    """Load a model using auto-detected checkpoint.
+
+    Args:
+        model_name: Architecture name.
 
     Returns:
         Model in eval mode on the current device.
 
     Raises:
-        FileNotFoundError: If the checkpoint does not exist.
+        FileNotFoundError: If no checkpoint is found.
     """
     global _cached_model, _cached_model_key
 
-    cache_key = f"{model_name}::{checkpoint_path}"
-    if _cached_model is not None and _cached_model_key == cache_key:
+    if _cached_model is not None and _cached_model_key == model_name:
         return _cached_model
 
-    config = _load_config()
-    ckpt_path = Path(checkpoint_path)
-    if not ckpt_path.exists():
-        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+    ckpt_path = _find_checkpoint(model_name)
+    if ckpt_path is None:
+        raise FileNotFoundError(
+            f"No checkpoint found for '{model_name}'. "
+            f"Expected '{_MODEL_CHECKPOINT_NAMES[model_name]}' in one of: "
+            f"{[str(d) for d in _CHECKPOINT_SEARCH_DIRS]}"
+        )
 
+    config = _load_config()
     model = get_model(model_name, config).to(_device)
     ckpt = torch.load(ckpt_path, map_location=_device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
     _cached_model = model
-    _cached_model_key = cache_key
-    logger.info("Loaded model %s from %s", model_name, checkpoint_path)
+    _cached_model_key = model_name
+    logger.info("Loaded %s from %s", model_name, ckpt_path)
     return model
 
 
 # ---------------------------------------------------------------------------
-# Preprocessing helper (numpy RGB uint8 → tensor)
+# Preprocessing
 # ---------------------------------------------------------------------------
 
 def _numpy_to_tensor(
@@ -121,14 +175,13 @@ def _numpy_to_tensor(
 
 
 # ---------------------------------------------------------------------------
-# Prediction function (called by Gradio)
+# Prediction
 # ---------------------------------------------------------------------------
 
 def predict(
     before_image: Optional[np.ndarray],
     after_image: Optional[np.ndarray],
     model_name: str,
-    checkpoint_path: str,
     threshold: float,
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], str]:
     """Run change detection and return visualisations + summary text.
@@ -137,26 +190,22 @@ def predict(
         before_image: Before image as numpy ``[H, W, 3]`` RGB uint8.
         after_image: After image as numpy ``[H, W, 3]`` RGB uint8.
         model_name: Architecture name.
-        checkpoint_path: Path to checkpoint file.
         threshold: Binarisation threshold for predictions.
 
     Returns:
         Tuple of ``(change_mask, overlay_image, summary_text)``.
-        - ``change_mask``: uint8 grayscale ``[H, W]`` (0 or 255).
-        - ``overlay_image``: uint8 RGB ``[H, W, 3]``.
-        - ``summary_text``: Markdown string with change statistics.
     """
     if before_image is None or after_image is None:
-        return None, None, "Please upload both before and after images."
+        return None, None, "Please upload both **before** and **after** images."
 
     config = _load_config()
     patch_size: int = config.get("dataset", {}).get("patch_size", 256)
 
-    # Load model
+    # Load model (auto-detects checkpoint)
     try:
-        model = _load_model(model_name, checkpoint_path)
+        model = _load_model(model_name)
     except FileNotFoundError as exc:
-        return None, None, f"Error: {exc}"
+        return None, None, f"**Error:** {exc}"
 
     # Preprocess
     tensor_a, (orig_h, orig_w) = _numpy_to_tensor(before_image, patch_size)
@@ -165,14 +214,14 @@ def predict(
     # Tiled inference
     prob_map = sliding_window_inference(model, tensor_a, tensor_b, patch_size, _device)
     prob_map = prob_map[:, :, :orig_h, :orig_w]
-    prob_np = prob_map.squeeze().numpy()  # [H, W]
+    prob_np = prob_map.squeeze().numpy()
 
     # Binary change mask
     binary_mask = (prob_np > threshold).astype(np.uint8) * 255
 
     # Overlay on after image
-    pred_tensor = (prob_map.squeeze(0) >= threshold).float()  # [1, H, W]
-    img_b_tensor = tensor_b.squeeze()[:, :orig_h, :orig_w]    # [3, H, W]
+    pred_tensor = (prob_map.squeeze(0) >= threshold).float()
+    img_b_tensor = tensor_b.squeeze()[:, :orig_h, :orig_w]
     overlay_rgb = overlay_changes(
         img_after=img_b_tensor,
         mask_pred=pred_tensor,
@@ -185,14 +234,19 @@ def predict(
     changed_pixels = int(binary_mask.sum() // 255)
     pct_changed = (changed_pixels / total_pixels) * 100.0
 
+    ckpt_path = _find_checkpoint(model_name)
     summary = (
-        f"### Change Detection Summary\n"
-        f"- **Image size**: {orig_w} x {orig_h}\n"
-        f"- **Total pixels**: {total_pixels:,}\n"
-        f"- **Changed pixels**: {changed_pixels:,}\n"
-        f"- **Area changed**: {pct_changed:.2f}%\n"
-        f"- **Model**: {model_name}\n"
-        f"- **Threshold**: {threshold}"
+        f"### Change Detection Results\n\n"
+        f"| Metric | Value |\n"
+        f"|---|---|\n"
+        f"| **Model** | {model_name} |\n"
+        f"| **Image size** | {orig_w} x {orig_h} |\n"
+        f"| **Total pixels** | {total_pixels:,} |\n"
+        f"| **Changed pixels** | {changed_pixels:,} |\n"
+        f"| **Area changed** | {pct_changed:.2f}% |\n"
+        f"| **Threshold** | {threshold} |\n"
+        f"| **Checkpoint** | {ckpt_path.name if ckpt_path else 'N/A'} |\n"
+        f"| **Device** | {_device} |"
     )
 
     return binary_mask, overlay_rgb, summary
@@ -208,31 +262,41 @@ def build_demo() -> gr.Blocks:
     Returns:
         A ``gr.Blocks`` application ready to ``.launch()``.
     """
-    config = _load_config()
-    gradio_cfg = config.get("gradio", {})
+    available = _get_available_models()
+    all_models = list(_MODEL_CHECKPOINT_NAMES.keys())
 
-    with gr.Blocks(
-        title="Military Base Change Detection",
-        theme=gr.themes.Soft(),
-    ) as demo:
+    # Show which models are available
+    status_lines = []
+    for m in all_models:
+        ckpt = _find_checkpoint(m)
+        if ckpt:
+            status_lines.append(f"- **{m}**: {ckpt.name}")
+        else:
+            status_lines.append(f"- **{m}**: not found")
+    model_status = "\n".join(status_lines)
+
+    default_model = available[0] if available else "changeformer"
+
+    with gr.Blocks(title="Military Base Change Detection") as demo:
 
         gr.Markdown(
             "# Military Base Change Detection\n"
             "Upload **before** and **after** satellite images to detect "
-            "construction, infrastructure changes, and runway development."
+            "construction, infrastructure changes, and runway development.\n\n"
+            "**Available models:**\n" + model_status
         )
 
         # ---- Inputs ---------------------------------------------------
         with gr.Row():
             with gr.Column(scale=1):
                 before_img = gr.Image(
-                    label="Before Image",
+                    label="Before Image (older)",
                     type="numpy",
                     sources=["upload", "clipboard"],
                 )
             with gr.Column(scale=1):
                 after_img = gr.Image(
-                    label="After Image",
+                    label="After Image (newer)",
                     type="numpy",
                     sources=["upload", "clipboard"],
                 )
@@ -240,13 +304,9 @@ def build_demo() -> gr.Blocks:
         # ---- Controls -------------------------------------------------
         with gr.Row():
             model_dropdown = gr.Dropdown(
-                choices=["siamese_cnn", "unet_pp", "changeformer"],
-                value=gradio_cfg.get("default_model", "unet_pp"),
+                choices=available if available else all_models,
+                value=default_model,
                 label="Model Architecture",
-            )
-            checkpoint_input = gr.Textbox(
-                value=gradio_cfg.get("default_checkpoint", "checkpoints/unet_pp_best.pth"),
-                label="Checkpoint Path",
             )
             threshold_slider = gr.Slider(
                 minimum=0.1,
@@ -270,13 +330,7 @@ def build_demo() -> gr.Blocks:
         # ---- Wiring ---------------------------------------------------
         detect_btn.click(
             fn=predict,
-            inputs=[
-                before_img,
-                after_img,
-                model_dropdown,
-                checkpoint_input,
-                threshold_slider,
-            ],
+            inputs=[before_img, after_img, model_dropdown, threshold_slider],
             outputs=[change_mask_out, overlay_out, summary_out],
         )
 

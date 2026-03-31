@@ -9,7 +9,7 @@ project:
 
 # --- Colab / runtime settings ---
 colab:
-  enabled: true
+  enabled: false
   drive_root: "/content/drive/MyDrive/change-detection"
   checkpoint_dir: "/content/drive/MyDrive/change-detection/checkpoints"
   log_dir: "/content/drive/MyDrive/change-detection/logs"
@@ -139,5 +139,5 @@ epoch_counts:
 gradio:
   server_port: 7860
   share: false
-  default_model: "unet_pp"
-  default_checkpoint: "checkpoints/unet_pp_best.pth"
+  default_model: "changeformer"
+  default_checkpoint: "checkpoints/changeformer_best.pth"
