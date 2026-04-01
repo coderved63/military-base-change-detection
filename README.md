@@ -156,15 +156,15 @@ Opens a web interface at `localhost:7860` with:
 
 ---
 
-## Expected Results (LEVIR-CD Test Set)
+## Results (LEVIR-CD Test Set)
 
-| Model | F1 | IoU | Precision | Recall | OA |
-|---|---|---|---|---|---|
-| Siamese CNN | TBD | TBD | TBD | TBD | TBD |
-| UNet++ | TBD | TBD | TBD | TBD | TBD |
-| ChangeFormer | TBD | TBD | TBD | TBD | TBD |
+| Model | F1 | IoU | Precision | Recall | OA | Epochs |
+|---|---|---|---|---|---|---|
+| Siamese CNN | 0.6441 | 0.4751 | 0.8084 | 0.5353 | 0.9699 | 3* |
+| **UNet++** | **0.9035** | **0.8240** | **0.9280** | **0.8803** | **0.9904** | 85 |
+| ChangeFormer | 0.8836 | 0.7915 | 0.8944 | 0.8731 | 0.9883 | 141 |
 
-*Results will be populated after training on LEVIR-CD.*
+*\*Siamese CNN undertrained due to session interruption (3 epochs). UNet++ achieves the best F1 score with nested skip connections excelling at multi-scale change detection.*
 
 ---
 
